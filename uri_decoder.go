@@ -10,11 +10,14 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/oschwald/geoip2-golang"
+	"gopkg.in/yaml.v3"
 )
 
 var proxies map[string][]interface{}
@@ -25,6 +28,7 @@ var uri_list string
 var ifile string
 var outfile string
 var db_path string
+var proxy_uri string
 var geo2db *geoip2.Reader
 
 func init() {
@@ -32,6 +36,7 @@ func init() {
 	flag.StringVar(&ifile, "ifile", "", "input file: base64 encoded data or normal text eg. ss://,ssr://,vmess://.")
 	flag.StringVar(&outfile, "out", "", "output file path.")
 	flag.StringVar(&db_path, "db", "Country.mmdb", "geoip2 Country mmdb path")
+	flag.StringVar(&proxy_uri, "proxy", "socks5://127.0.0.1:1080", "use proxy")
 }
 
 func get_country(ipaddr string) string {
@@ -362,7 +367,7 @@ func print_ssr(proxy map[string]interface{}) {
 
 }
 
-func format_print(proxies []map[string]interface{}) {
+func FormatPrintProxy(proxies []map[string]interface{}) {
 	//Yaml格式化输出代理信息(为了保证字段输出顺序)
 	fmt.Println("proxies:")
 	for _, proxy := range proxies {
@@ -377,17 +382,145 @@ func format_print(proxies []map[string]interface{}) {
 			return
 		}
 	}
-	/* 代理组输出(已废弃)
-	fmt.Println("proxy-groups:")
-	fmt.Println("- name: ", "DIY")
-	fmt.Println("  type: select")
-	fmt.Println("  url: http://www.gstatic.com/generate_204")
-	fmt.Println("  interval: 300")
-	fmt.Println("  proxies: ")
-	for _, v := range proxy_name_list {
-		fmt.Println("    - ", v)
+}
+
+// Decode decodes base64url string to byte array
+func DecodeBase64(data string) (string, error) {
+	data = strings.Replace(data, "-", "+", -1) // 62nd char of encoding
+	data = strings.Replace(data, "_", "/", -1) // 63rd char of encoding
+
+	switch len(data) % 4 { // Pad with trailing '='s
+	case 0: // no padding
+	case 2:
+		data += "==" // 2 pad chars
+	case 3:
+		data += "=" // 1 pad char
 	}
-	*/
+	result, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return "", err
+	}
+	return string(result), err
+}
+
+// 加载Yaml格式数据
+func LoadYaml(data string) (m map[string]interface{}, err error) {
+	err = yaml.Unmarshal([]byte(data), &m)
+	return m, err
+}
+
+func DownloadUrl(myurl string) string {
+
+	tr := &http.Transport{}
+	if proxy_uri != "" {
+		// 检测端口是否可访问
+		if _, err1 := net.DialTimeout("tcp", proxy_uri, 3*time.Second); err1 == nil {
+
+			// fmt.Println("DEBUG: proxy:", proxy_uri)
+			// url.Parse 解析 proxy 字符串 返回一个 URL 结构体变量指针
+			proxyURL, err := url.Parse(proxy_uri)
+			if err != nil {
+				panic(err)
+			}
+			// http.ProxyURL()调用proxyURL参数并返回一个proxy函数(给Transport的Proxy使用)
+			tr.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	// 新建client,并初始化一个Transport配置信息，这样client的HTTP请求都会通过代理转发
+	client := &http.Client{
+		// checkRedirect: redirectPolicyFunc,
+		Transport: tr,
+	}
+
+	request, err := http.NewRequest("GET", myurl, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	resp, err := client.Do(request)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		// error
+		panic(err)
+	}
+	return string(body)
+}
+
+// 解析HTTP(S)订阅源代理节点
+func DecodeUrl(url string) error {
+	url_content := DownloadUrl(url)
+	uri_data, err := DecodeBase64(url_content)
+	if err == nil {
+		// Base64 解码成功
+		DecodeUriList(uri_data)
+	} else {
+		yaml_data, err1 := LoadYaml(url_content)
+		if err1 == nil {
+			// Yaml格式加载成功,判断是否有 proxies 信息
+			proxies_data, proxies_exist := yaml_data["proxies"]
+			if proxies_exist {
+				// 存在 proxies 节点信息
+				for _, v := range proxies_data.([]interface{}) {
+					proxy_list = append(proxy_list, v.(map[string]interface{}))
+				}
+				return nil
+			}
+		}
+		// 非 Base64 编码数据,直接保存内容
+		DecodeUriList(url_content)
+	}
+	return nil
+}
+
+// 解析proxy_uri列表数据
+func DecodeUriList(uris string) {
+
+	uri_array := strings.Fields(uris)
+	var result map[string]interface{}
+
+	for _, k := range uri_array {
+		// fmt.Println("DEBUG:k=", k)
+		if len(k) < 5 {
+			continue
+		}
+		switch v := k[0:5]; v {
+		case "ss://":
+			result = decode_uri_ss(k)
+		case "ssr:/":
+			result = decode_uri_ssr(k)
+		case "vmess":
+			result = decode_uri_vmess(k)
+		case "http:":
+			DecodeUrl(k)
+			continue
+		case "https":
+			DecodeUrl(k)
+			continue
+		default:
+			// 无效链接信息
+			continue
+		}
+		ipaddr := fmt.Sprintf("%v", result["server"])
+		port := fmt.Sprintf("%v", result["port"])
+		stype := fmt.Sprintf("%v", result["type"])
+		result["name"] = get_country(ipaddr) + "_" + stype + "_" + ipaddr + ":" + port
+		proxy_name_list = append(proxy_name_list, result["name"])
+		proxy_list = append(proxy_list, result)
+	}
+}
+
+// 支持解析 http(s)订阅地址/ss/ssr/vmess等格式
+func StartDecode(data string) {
+	proxy_data, err := DecodeBase64(data)
+	if err != nil {
+		panic(err)
+	}
+	DecodeUriList(proxy_data)
 
 }
 
@@ -437,7 +570,7 @@ func decode_uri(uris string) {
 		proxy_name_list = append(proxy_name_list, result["name"])
 		proxy_list = append(proxy_list, result)
 	}
-	format_print(proxy_list)
+	FormatPrintProxy(proxy_list)
 }
 
 func main() {
@@ -453,7 +586,8 @@ func main() {
 	if ifile != "" {
 		decode_file(ifile)
 	} else if uri_list != "" {
-		decode_uri(uri_list)
+		StartDecode(uri_list)
+		FormatPrintProxy(proxy_list)
 	} else {
 		log.Fatal("no -uri and ifile is given!")
 	}

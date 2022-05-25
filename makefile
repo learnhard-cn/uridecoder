@@ -2,7 +2,7 @@
 binfile = uridecoder_linux
 LDFLAGS = '-w -extldflags "-static"'
 
-all:	amd64 arm amd64
+all:	amd64 arm arm64
 
 amd64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ${binfile} ${LDFALGS} && mv ./${binfile} ./${binfile}_amd64
