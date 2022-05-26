@@ -172,10 +172,11 @@ func decode_uri_ssr(uri string) map[string]interface{} {
 	result["obfs"] = basic[4]
 	result["password"], _ = Decode(basic[5])
 
-	real_uri := "ssr://" + basic[0] + ":" + basic[1] + "/" + tmp[1]
-
-	u1, _ := url.Parse(real_uri)
-	q := u1.Query()
+	real_uri := tmp[1][1:]
+	q, err := url.ParseQuery(real_uri)
+	if err != nil {
+		return nil
+	}
 
 	switch {
 	case q.Get("obfsparam") != "":
@@ -414,8 +415,8 @@ func DownloadUrl(myurl string) string {
 	tr := &http.Transport{}
 	if proxy_uri != "" {
 		// 检测端口是否可访问
-		if _, err1 := net.DialTimeout("tcp", proxy_uri, 3*time.Second); err1 == nil {
-
+		if conn, err1 := net.DialTimeout("tcp", proxy_uri, 2*time.Second); err1 == nil {
+			conn.Close()
 			// fmt.Println("DEBUG: proxy:", proxy_uri)
 			// url.Parse 解析 proxy 字符串 返回一个 URL 结构体变量指针
 			proxyURL, err := url.Parse(proxy_uri)
@@ -425,6 +426,7 @@ func DownloadUrl(myurl string) string {
 			// http.ProxyURL()调用proxyURL参数并返回一个proxy函数(给Transport的Proxy使用)
 			tr.Proxy = http.ProxyURL(proxyURL)
 		}
+
 	}
 
 	// 新建client,并初始化一个Transport配置信息，这样client的HTTP请求都会通过代理转发
